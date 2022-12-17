@@ -216,7 +216,7 @@ if not FITBIT_ACCESS_TOKEN:
     f.close()
 
 try:
-    response = requests.get('https://api.fitbit.com/1/user/-/devices.json', 
+    response = requests.get('https://api.fitbit.com/1/user/-/devices.json',
         headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
     response.raise_for_status()
 except requests.exceptions.HTTPError as err:
