@@ -17,10 +17,8 @@ import requests, sys, os, pytz
 from datetime import datetime, date, timedelta
 from config import *
 
-if not FITBIT_CLIENT_ID or not FITBIT_CLIENT_SECRET:
-    logging.error("FITBIT_CLIENT_ID or FITBIT_CLIENT_SECRET not set in config.py")
-    sys.exit(1)
-points = []
+POINTS = []
+
 
 def fetch_data(category, type):
     try:
@@ -35,13 +33,14 @@ def fetch_data(category, type):
     logging.info(f"Got {type} from Fitbit")
 
     for day in data[category.replace('/', '-') + '-' + type]:
-        points.append({
+        POINTS.append({
                 "measurement": type,
                 "time": LOCAL_TIMEZONE.localize(datetime.fromisoformat(day['dateTime'])).astimezone(pytz.utc).isoformat(),
                 "fields": {
                     "value": float(day['value'])
                 }
             })
+
 
 def fetch_heartrate(date):
     try:
@@ -57,7 +56,7 @@ def fetch_heartrate(date):
 
     for day in data['activities-heart']:
         if 'restingHeartRate' in day['value']:
-            points.append({
+            POINTS.append({
                     "measurement": "restingHeartRate",
                     "time": datetime.fromisoformat(day['dateTime']),
                     "fields": {
@@ -68,7 +67,7 @@ def fetch_heartrate(date):
         if 'heartRateZones' in day['value']:
             for zone in day['value']['heartRateZones']:
                 if 'caloriesOut' in zone and 'min' in zone and 'max' in zone and 'minutes' in zone:
-                    points.append({
+                    POINTS.append({
                             "measurement": "heartRateZones",
                             "time": datetime.fromisoformat(day['dateTime']),
                             "tags": {
@@ -82,7 +81,7 @@ def fetch_heartrate(date):
                             }
                         })
                 elif 'min' in zone and 'max' in zone and 'minutes' in zone:
-                    points.append({
+                    POINTS.append({
                             "measurement": "heartRateZones",
                             "time": datetime.fromisoformat(day['dateTime']),
                             "tags": {
@@ -99,13 +98,14 @@ def fetch_heartrate(date):
         for value in data['activities-heart-intraday']['dataset']:
             time = datetime.fromisoformat(date + "T" + value['time'])
             utc_time = LOCAL_TIMEZONE.localize(time).astimezone(pytz.utc).isoformat()
-            points.append({
+            POINTS.append({
                     "measurement": "heartrate",
                     "time": utc_time,
                     "fields": {
                         "value": float(value['value'])
                     }
                 })
+
 
 def process_levels(levels):
     for level in levels:
@@ -119,13 +119,14 @@ def process_levels(levels):
 
         time = datetime.fromisoformat(level['dateTime'])
         utc_time = LOCAL_TIMEZONE.localize(time).astimezone(pytz.utc).isoformat()
-        points.append({
+        POINTS.append({
                 "measurement": "sleep_levels",
                 "time": utc_time,
                 "fields": {
                     "seconds": int(level['seconds'])
                 }
             })
+
 
 def fetch_activities(date):
     try:
@@ -172,7 +173,7 @@ def fetch_activities(date):
 
         time = datetime.fromisoformat(activity['startTime'].strip("Z"))
         utc_time = time.astimezone(pytz.utc).isoformat()
-        points.append({
+        POINTS.append({
             "measurement": "activity",
             "time": utc_time,
             "tags": {
@@ -181,141 +182,157 @@ def fetch_activities(date):
             "fields": fields
         })
 
-connect(FITBIT_DATABASE)
 
-if not FITBIT_ACCESS_TOKEN:
-    script_dir = os.path.dirname(__file__)
-    refresh_token_path = os.path.join(script_dir, '.fitbit-refreshtoken')
-    if os.path.isfile(refresh_token_path):
-        f = open(refresh_token_path, "r")
-        token = f.read().strip()
+def login():
+    connect(FITBIT_DATABASE)
+    global FITBIT_ACCESS_TOKEN
+
+    if not FITBIT_ACCESS_TOKEN:
+        script_dir = os.path.dirname(__file__)
+        refresh_token_path = os.path.join(script_dir, '.fitbit-refreshtoken')
+        if os.path.isfile(refresh_token_path):
+            f = open(refresh_token_path, "r")
+            token = f.read().strip()
+            f.close()
+            response = requests.post('https://api.fitbit.com/oauth2/token',
+                data={
+                    "client_id": FITBIT_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "redirect_uri": FITBIT_REDIRECT_URI,
+                    "refresh_token": token
+                }, auth=(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET))
+        else:
+            response = requests.post('https://api.fitbit.com/oauth2/token',
+                data={
+                    "client_id": FITBIT_CLIENT_ID,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": FITBIT_REDIRECT_URI,
+                    "code": FITBIT_INITIAL_CODE
+                }, auth=(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET))
+
+        response.raise_for_status()
+
+        json = response.json()
+        FITBIT_ACCESS_TOKEN = json['access_token']
+        refresh_token = json['refresh_token']
+        f = open(refresh_token_path, "w+")
+        f.write(refresh_token)
         f.close()
-        response = requests.post('https://api.fitbit.com/oauth2/token',
-            data={
-                "client_id": FITBIT_CLIENT_ID,
-                "grant_type": "refresh_token",
-                "redirect_uri": FITBIT_REDIRECT_URI,
-                "refresh_token": token
-            }, auth=(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET))
-    else:
-        response = requests.post('https://api.fitbit.com/oauth2/token',
-            data={
-                "client_id": FITBIT_CLIENT_ID,
-                "grant_type": "authorization_code",
-                "redirect_uri": FITBIT_REDIRECT_URI,
-                "code": FITBIT_INITIAL_CODE
-            }, auth=(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET))
 
-    response.raise_for_status()
 
-    json = response.json()
-    FITBIT_ACCESS_TOKEN = json['access_token']
-    refresh_token = json['refresh_token']
-    f = open(refresh_token_path, "w+")
-    f.write(refresh_token)
-    f.close()
+def get_devices():
+    try:
+        response = requests.get('https://api.fitbit.com/1/user/-/devices.json',
+            headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as err:
+        logging.error("HTTP request failed: %s", err)
+        sys.exit(1)
 
-try:
-    response = requests.get('https://api.fitbit.com/1/user/-/devices.json',
-        headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
-    response.raise_for_status()
-except requests.exceptions.HTTPError as err:
-    logging.error("HTTP request failed: %s", err)
-    sys.exit(1)
+    data = response.json()
+    logging.info("Got devices from Fitbit")
 
-data = response.json()
-logging.info("Got devices from Fitbit")
-
-for device in data:
-    points.append({
-        "measurement": "deviceBatteryLevel",
-        "time": LOCAL_TIMEZONE.localize(datetime.fromisoformat(device['lastSyncTime'])).astimezone(pytz.utc).isoformat(),
-        "tags": {
-            "id": device['id'],
-            "deviceVersion": device['deviceVersion'],
-            "type": device['type'],
-            "mac": device['mac'],
-        },
-        "fields": {
-            "value": float(device['batteryLevel'])
-        }
-    })
-
-end = date.today()
-start = end - timedelta(days=1)
-
-try:
-    response = requests.get(f'https://api.fitbit.com/1.2/user/-/sleep/date/{start.isoformat()}/{end.isoformat()}.json',
-        headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
-    response.raise_for_status()
-except requests.exceptions.HTTPError as err:
-    logging.error("HTTP request failed: %s", err)
-    sys.exit(1)
-
-data = response.json()
-logging.info("Got sleep sessions from Fitbit")
-
-for day in data['sleep']:
-    time = datetime.fromisoformat(day['startTime'])
-    utc_time = LOCAL_TIMEZONE.localize(time).astimezone(pytz.utc).isoformat()
-    if day['type'] == 'stages':
-        points.append({
-            "measurement": "sleep",
-            "time": utc_time,
+    for device in data:
+        POINTS.append({
+            "measurement": "deviceBatteryLevel",
+            "time": LOCAL_TIMEZONE.localize(datetime.fromisoformat(device['lastSyncTime'])).astimezone(pytz.utc).isoformat(),
+            "tags": {
+                "id": device['id'],
+                "deviceVersion": device['deviceVersion'],
+                "type": device['type'],
+                "mac": device['mac'],
+            },
             "fields": {
-                "duration": int(day['duration']),
-                "efficiency": int(day['efficiency']),
-                "is_main_sleep": bool(day['isMainSleep']),
-                "minutes_asleep": int(day['minutesAsleep']),
-                "minutes_awake": int(day['minutesAwake']),
-                "time_in_bed": int(day['timeInBed']),
-                "minutes_deep": int(day['levels']['summary']['deep']['minutes']),
-                "minutes_light": int(day['levels']['summary']['light']['minutes']),
-                "minutes_rem": int(day['levels']['summary']['rem']['minutes']),
-                "minutes_wake": int(day['levels']['summary']['wake']['minutes']),
+                "value": float(device['batteryLevel'])
             }
         })
-    else:
-        points.append({
-            "measurement": "sleep",
-            "time": utc_time,
-            "fields": {
-                "duration": int(day['duration']),
-                "efficiency": int(day['efficiency']),
-                "is_main_sleep": bool(day['isMainSleep']),
-                "minutes_asleep": int(day['minutesAsleep']),
-                "minutes_awake": int(day['minutesAwake']),
-                "time_in_bed": int(day['timeInBed']),
-                "minutes_deep": 0,
-                "minutes_light": int(day['levels']['summary']['asleep']['minutes']),
-                "minutes_rem": int(day['levels']['summary']['restless']['minutes']),
-                "minutes_wake": int(day['levels']['summary']['awake']['minutes']),
-            }
-        })
-    
-    if 'data' in day['levels']:
-        process_levels(day['levels']['data'])
-    
-    if 'shortData' in day['levels']:
-        process_levels(day['levels']['shortData'])
 
-fetch_data('activities', 'steps')
-fetch_data('activities', 'distance')
-fetch_data('activities', 'floors')
-fetch_data('activities', 'elevation')
-fetch_data('activities', 'distance')
-fetch_data('activities', 'minutesSedentary')
-fetch_data('activities', 'minutesLightlyActive')
-fetch_data('activities', 'minutesFairlyActive')
-fetch_data('activities', 'minutesVeryActive')
-fetch_data('activities', 'calories')
-fetch_data('activities', 'activityCalories')
-fetch_data('body', 'weight')
-fetch_data('body', 'fat')
-fetch_data('body', 'bmi')
-fetch_data('foods/log', 'water')
-fetch_data('foods/log', 'caloriesIn')
-fetch_heartrate(date.today().isoformat())
-fetch_activities((date.today() + timedelta(days=1)).isoformat())
 
-write_points(points)
+def get_sleeps():
+    end = date.today()
+    start = end - timedelta(days=1)
+
+    try:
+        response = requests.get(f'https://api.fitbit.com/1.2/user/-/sleep/date/{start.isoformat()}/{end.isoformat()}.json',
+            headers={'Authorization': f'Bearer {FITBIT_ACCESS_TOKEN}', 'Accept-Language': FITBIT_LANGUAGE})
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as err:
+        logging.error("HTTP request failed: %s", err)
+        sys.exit(1)
+
+    data = response.json()
+    logging.info("Got sleep sessions from Fitbit")
+
+    for day in data['sleep']:
+        time = datetime.fromisoformat(day['startTime'])
+        utc_time = LOCAL_TIMEZONE.localize(time).astimezone(pytz.utc).isoformat()
+        if day['type'] == 'stages':
+            POINTS.append({
+                "measurement": "sleep",
+                "time": utc_time,
+                "fields": {
+                    "duration": int(day['duration']),
+                    "efficiency": int(day['efficiency']),
+                    "is_main_sleep": bool(day['isMainSleep']),
+                    "minutes_asleep": int(day['minutesAsleep']),
+                    "minutes_awake": int(day['minutesAwake']),
+                    "time_in_bed": int(day['timeInBed']),
+                    "minutes_deep": int(day['levels']['summary']['deep']['minutes']),
+                    "minutes_light": int(day['levels']['summary']['light']['minutes']),
+                    "minutes_rem": int(day['levels']['summary']['rem']['minutes']),
+                    "minutes_wake": int(day['levels']['summary']['wake']['minutes']),
+                }
+            })
+        else:
+            POINTS.append({
+                "measurement": "sleep",
+                "time": utc_time,
+                "fields": {
+                    "duration": int(day['duration']),
+                    "efficiency": int(day['efficiency']),
+                    "is_main_sleep": bool(day['isMainSleep']),
+                    "minutes_asleep": int(day['minutesAsleep']),
+                    "minutes_awake": int(day['minutesAwake']),
+                    "time_in_bed": int(day['timeInBed']),
+                    "minutes_deep": 0,
+                    "minutes_light": int(day['levels']['summary']['asleep']['minutes']),
+                    "minutes_rem": int(day['levels']['summary']['restless']['minutes']),
+                    "minutes_wake": int(day['levels']['summary']['awake']['minutes']),
+                }
+            })
+        if 'data' in day['levels']:
+            process_levels(day['levels']['data'])
+        if 'shortData' in day['levels']:
+            process_levels(day['levels']['shortData'])
+
+
+def main():
+    login()
+    get_devices()
+    get_sleeps()
+    fetch_data('activities', 'steps')
+    fetch_data('activities', 'distance')
+    fetch_data('activities', 'floors')
+    fetch_data('activities', 'elevation')
+    fetch_data('activities', 'distance')
+    fetch_data('activities', 'minutesSedentary')
+    fetch_data('activities', 'minutesLightlyActive')
+    fetch_data('activities', 'minutesFairlyActive')
+    fetch_data('activities', 'minutesVeryActive')
+    fetch_data('activities', 'calories')
+    fetch_data('activities', 'activityCalories')
+    fetch_data('body', 'weight')
+    fetch_data('body', 'fat')
+    fetch_data('body', 'bmi')
+    fetch_data('foods/log', 'water')
+    fetch_data('foods/log', 'caloriesIn')
+    fetch_heartrate(date.today().isoformat())
+    fetch_activities((date.today() + timedelta(days=1)).isoformat())
+    write_points(POINTS)
+
+
+if __name__ == "__main__":
+    if not FITBIT_CLIENT_ID or not FITBIT_CLIENT_SECRET:
+        logging.error("FITBIT_CLIENT_ID or FITBIT_CLIENT_SECRET not set in config.py")
+        sys.exit(1)
+    main()
