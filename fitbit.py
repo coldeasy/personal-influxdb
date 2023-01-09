@@ -183,23 +183,39 @@ def fetch_activities(date):
         })
 
 
+def _write_refresh_token(token):
+    script_dir = os.path.dirname(__file__)
+    refresh_token_path = os.path.join(script_dir, '.fitbit-refreshtoken')
+    with open(refresh_token_path, "w+") as f:
+        f.write(token)
+
+
+def _get_refresh_token():
+    script_dir = os.path.dirname(__file__)
+    refresh_token_path = os.path.join(script_dir, '.fitbit-refreshtoken')
+    token = None
+    if os.path.isfile(refresh_token_path):
+        with open(refresh_token_path, "r") as f:
+            token = f.read().strip()
+    elif 'FITBIT_REFRESH_TOKEN' in os.environ:
+        token = os.environ['FITBIT_REFRESH_TOKEN'].strip()
+
+    return token
+
+
 def login():
     connect(FITBIT_DATABASE)
     global FITBIT_ACCESS_TOKEN
 
     if not FITBIT_ACCESS_TOKEN:
-        script_dir = os.path.dirname(__file__)
-        refresh_token_path = os.path.join(script_dir, '.fitbit-refreshtoken')
-        if os.path.isfile(refresh_token_path):
-            f = open(refresh_token_path, "r")
-            token = f.read().strip()
-            f.close()
+        refresh_token = _get_refresh_token()
+        if refresh_token is not None:
             response = requests.post('https://api.fitbit.com/oauth2/token',
                 data={
                     "client_id": FITBIT_CLIENT_ID,
                     "grant_type": "refresh_token",
                     "redirect_uri": FITBIT_REDIRECT_URI,
-                    "refresh_token": token
+                    "refresh_token": refresh_token
                 }, auth=(FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET))
         else:
             response = requests.post('https://api.fitbit.com/oauth2/token',
@@ -215,9 +231,7 @@ def login():
         json = response.json()
         FITBIT_ACCESS_TOKEN = json['access_token']
         refresh_token = json['refresh_token']
-        f = open(refresh_token_path, "w+")
-        f.write(refresh_token)
-        f.close()
+        _write_refresh_token(refresh_token)
 
 
 def get_devices():
