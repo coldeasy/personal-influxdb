@@ -254,7 +254,7 @@ def get_devices():
                 "id": device['id'],
                 "deviceVersion": device['deviceVersion'],
                 "type": device['type'],
-                "mac": device['mac'],
+                "mac": device.get('mac'),
             },
             "fields": {
                 "value": float(device['batteryLevel'])
